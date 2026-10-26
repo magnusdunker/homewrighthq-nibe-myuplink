@@ -120,6 +120,19 @@ pub fn parse_redirect(input: &str, state: &str) -> Result<String, &'static str> 
     get("code").filter(|c| !c.is_empty()).ok_or("missing_code")
 }
 
+/// The code from the query of a redirect HomewrightHQ received. `Err` is a
+/// form error code.
+pub fn code_from_query(q: &Map<String, Value>, state: &str) -> Result<String, &'static str> {
+    let get = |k: &str| q.get(k).and_then(Value::as_str);
+    if get("error").is_some() {
+        return Err("access_denied");
+    }
+    if get("state") != Some(state) {
+        return Err("state_mismatch");
+    }
+    get("code").filter(|c| !c.is_empty()).map(String::from).ok_or("missing_code")
+}
+
 async fn token_request(http: &reqwest::Client, urls: &Urls, form: &[(&str, &str)]) -> Result<Tokens, ApiError> {
     let res = http.post(&urls.token).form(form).send().await?;
     let status = res.status();

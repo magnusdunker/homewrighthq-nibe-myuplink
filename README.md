@@ -21,7 +21,7 @@ myUplink requires you to create your own application:
 Then add **myUplink (NIBE)** under **Add integration**, and enter the Client Identifier and Client Secret. There are two ways to log in:
 
 - **Client credentials** (default): HomewrightHQ logs in as the application and sees the devices that the account that created it has access to. No browser is involved.
-- **Login i browseren** (log in in the browser): the next step shows an address for myUplink's login. After login, myUplink sends the browser to the callback address. That page may show an error or "Linket er udløbet" (the link has expired); that does not matter. Copy the whole address from the address bar (it contains `code=...`) and paste it into the form. An external integration cannot receive the response from `/auth/external/callback` itself.
+- **Login i browseren** (log in in the browser): the next step shows an address for myUplink's login. After login, myUplink sends the browser to the callback address. If the page there says "Forbundet" (connected), HomewrightHQ has received the response: press Send in the form. If it shows an error or "Linket er udløbet" (the link has expired), copy the whole address from the address bar (it contains `code=...`), paste it into the form and press Send. HomewrightHQ receives the response for the integration with the plugin protocol's `oauth/expect` and `oauth/take`; on a HomewrightHQ without them, pasting the address is the only way.
 
 ## What you get
 

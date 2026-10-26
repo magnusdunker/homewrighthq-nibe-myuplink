@@ -92,6 +92,10 @@ fn authorize_address() {
     assert!(url.contains("scope=READSYSTEM+WRITESYSTEM+offline_access&state=s1"));
     assert_eq!(api::parse_redirect("http://localhost:8123/auth/external/callback?code=c1&state=s1", "s1"), Ok("c1".into()));
     assert_eq!(api::parse_redirect("http://x/?code=c1&state=s2", "s1"), Err("state_mismatch"));
+    let q = |v: Value| v.as_object().cloned().unwrap();
+    assert_eq!(api::code_from_query(&q(json!({ "state": "s1", "code": "c1" })), "s1"), Ok("c1".into()));
+    assert_eq!(api::code_from_query(&q(json!({ "state": "s2", "code": "c1" })), "s1"), Err("state_mismatch"));
+    assert_eq!(api::code_from_query(&q(json!({ "state": "s1", "error": "access_denied" })), "s1"), Err("access_denied"));
 }
 
 async fn cloud(server: &MockServer, premium: bool) {
@@ -229,17 +233,28 @@ async fn browser_login_saves_the_refresh_token() {
         .await;
     cloud(&server, true).await;
     let h = host::FakeHost::start(MyUplink::default());
+    let r = h.call("config_flow", json!({ "flow": flow(urls(&server)), "step": "user", "input": null })).await.unwrap();
+    assert_eq!(r["result"]["description_placeholders"]["redirect_uri"], host::REDIRECT_URI, "the address HomewrightHQ suggests");
     let input = json!({ "client_id": "cid", "client_secret": "sec", "grant": "authorization_code", "redirect_uri": "https://hjem.example/auth/external/callback" });
     let r = h.call("config_flow", json!({ "flow": flow(urls(&server)), "step": "user", "input": input })).await.unwrap();
     assert_eq!(r["result"]["step_id"], "auth");
     let data = r["data"].clone();
     let state = data["oauth_state"].as_str().unwrap().to_string();
     let pasted = json!({ "redirect_url": format!("https://hjem.example/auth/external/callback?code=c1&state={state}") });
-    let r = h.call("config_flow", json!({ "flow": flow(data), "step": "auth", "input": pasted })).await.unwrap();
+    let r = h.call("config_flow", json!({ "flow": flow(data.clone()), "step": "auth", "input": pasted })).await.unwrap();
     assert_eq!(r["result"]["type"], "create_entry");
     let entry = r["result"]["data"].clone();
     assert_eq!(entry["refresh_token"], "R1");
     assert_eq!(entry["grant"], "authorization_code");
+    assert!(entry.get("oauth_expected").is_none());
+
+    // the same login when the redirect reached HomewrightHQ: the form is sent empty
+    assert_eq!(h.rec.lock().unwrap().oauth_expected, std::slice::from_ref(&state));
+    let r = h.call("config_flow", json!({ "flow": flow(data.clone()), "step": "auth", "input": {} })).await.unwrap();
+    assert_eq!(r["result"]["errors"]["base"], "no_redirect");
+    h.rec.lock().unwrap().oauth_redirects.insert(state.clone(), json!({ "state": state, "code": "c1" }));
+    let r = h.call("config_flow", json!({ "flow": flow(data), "step": "auth", "input": {} })).await.unwrap();
+    assert_eq!(r["result"]["type"], "create_entry");
 
     h.call("setup_entry", json!({ "entry": { "entry_id": "e1", "domain": "myuplink", "data": entry } })).await.unwrap();
     assert_eq!(h.rec.lock().unwrap().entry_updates.last().unwrap()["refresh_token"], "R2");

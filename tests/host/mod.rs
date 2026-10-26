@@ -21,7 +21,14 @@ pub struct Recorded {
     pub issues: Vec<String>,
     /// The data of every `entry/update`, newest last.
     pub entry_updates: Vec<Value>,
+    /// States from `oauth/expect`.
+    pub oauth_expected: Vec<String>,
+    /// Redirects HomewrightHQ has received, by state, for `oauth/take`.
+    pub oauth_redirects: HashMap<String, Value>,
 }
+
+/// What the fake HomewrightHQ answers `oauth/redirect_uri` with.
+pub const REDIRECT_URI: &str = "https://hjem.example/auth/external/callback";
 
 pub struct FakeHost {
     tx: mpsc::UnboundedSender<String>,
@@ -146,6 +153,12 @@ fn answer(rec: &Mutex<Recorded>, method: &str, p: &Value) -> Value {
             rec.issues.push(p["issue_id"].as_str().unwrap_or("").to_string());
             Value::Null
         }
+        "oauth/redirect_uri" => json!({ "redirect_uri": REDIRECT_URI }),
+        "oauth/expect" => {
+            rec.oauth_expected.push(p["state"].as_str().unwrap_or("").to_string());
+            json!({ "redirect_uri": REDIRECT_URI })
+        }
+        "oauth/take" => rec.oauth_redirects.remove(p["state"].as_str().unwrap_or("")).unwrap_or(Value::Null),
         _ => Value::Null,
     }
 }

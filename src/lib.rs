@@ -4,8 +4,10 @@
 //! The user registers an application at dev.myuplink.com and enters its
 //! client id and secret. By default the integration logs in with the client
 //! credentials grant, which needs no browser. The authorization code grant
-//! is offered as well; then the user pastes the redirect address back into
-//! the form, because the plugin protocol cannot receive it.
+//! is offered as well. When its callback address is HomewrightHQ's
+//! `/auth/external/callback`, HomewrightHQ keeps the redirect for the plugin
+//! (`oauth/expect` and `oauth/take`); otherwise, or on a HomewrightHQ without
+//! those methods, the user pastes the redirect address back into the form.
 //!
 //! Every data point of a device becomes an entity: readings are sensors,
 //! writable points with a range are numbers, and writable points with named
@@ -61,7 +63,34 @@ const AUTH_TEXT: &str = "Åbn denne adresse, log ind med din myUplink-konto og g
 
 {url}
 
-myUplink sender derefter browseren videre til callback-adressen. Siden dér kan vise en fejl eller »Linket er udløbet«; det gør ikke noget. Kopiér hele adressen fra browserens adresselinje (den indeholder code=...) og indsæt den nedenfor.";
+myUplink sender derefter browseren videre til callback-adressen. Står der »Forbundet«, så tryk Send her. Viser siden en fejl eller »Linket er udløbet«, så kopiér hele adressen fra browserens adresselinje (den indeholder code=...), indsæt den nedenfor og tryk Send.";
+
+/// The callback address HomewrightHQ suggests, or the usual one on a
+/// HomewrightHQ without `oauth/redirect_uri`.
+async fn suggested_redirect(host: &Host) -> String {
+    host.request("oauth/redirect_uri", json!({}))
+        .await
+        .ok()
+        .and_then(|v| v["redirect_uri"].as_str().filter(|r| !r.is_empty()).map(String::from))
+        .unwrap_or_else(|| DEFAULT_REDIRECT.into())
+}
+
+/// Flow data with the suggested callback address, unless it has one.
+async fn with_redirect(host: &Host, mut d: Map<String, Value>) -> Map<String, Value> {
+    if str_of(&d, "redirect_uri").is_empty() {
+        d.insert("redirect_uri".into(), json!(suggested_redirect(host).await));
+    }
+    d
+}
+
+/// The code from the redirect HomewrightHQ received, if it has arrived.
+/// `Err` is a form error code.
+async fn received_code(host: &Host, state: &str) -> Result<String, &'static str> {
+    match host.request("oauth/take", json!({ "state": state, "wait": 3 })).await {
+        Ok(Value::Object(q)) => api::code_from_query(&q, state),
+        _ => Err("no_redirect"),
+    }
+}
 
 fn user_form(d: &Map<String, Value>, errors: Value) -> FlowReply {
     let s = |k: &str| d.get(k).and_then(Value::as_str).unwrap_or("").to_string();
@@ -92,9 +121,8 @@ fn user_form(d: &Map<String, Value>, errors: Value) -> FlowReply {
 fn auth_form(url: &str, errors: Value) -> FlowReply {
     let schema = json!({
         "type": "object",
-        "required": ["redirect_url"],
         "properties": {
-            "redirect_url": { "type": "string", "title": "Adressen, myUplink sendte dig til", "description": "Hele adressen fra adresselinjen, eller kun koden efter code=" }
+            "redirect_url": { "type": "string", "title": "Adressen, myUplink sendte dig til", "description": "Tom, når siden sagde »Forbundet«. Ellers hele adressen fra adresselinjen, eller kun koden efter code=" }
         }
     });
     let mut r = FlowReply::form_with_errors("auth", schema, errors);
@@ -173,14 +201,18 @@ async fn finish(flow: &Flow, d: &Map<String, Value>, client: Client, refresh: Op
 
 #[async_trait]
 impl Integration for MyUplink {
-    async fn config_flow(&self, _host: &Host, flow: Flow, step: &str, input: Option<Value>) -> Result<FlowReply, Error> {
+    async fn config_flow(&self, host: &Host, flow: Flow, step: &str, input: Option<Value>) -> Result<FlowReply, Error> {
         match (step, input) {
-            ("user", None) => Ok(user_form(&flow.data, json!({}))),
+            ("user", None) => {
+                let d = with_redirect(host, flow.data.clone()).await;
+                Ok(user_form(&d, json!({})).with_data(d))
+            }
             ("reauth", None) => {
                 let mut d = flow.data.clone();
                 for (k, v) in flow.entry.as_ref().and_then(|e| e.data.as_object().cloned()).unwrap_or_default() {
                     d.entry(k).or_insert(v);
                 }
+                let d = with_redirect(host, d).await;
                 Ok(user_form(&d, json!({})).with_data(d))
             }
             ("user", Some(v)) => {
@@ -218,6 +250,9 @@ impl Integration for MyUplink {
                         let url = api::authorize_url(&u, &id, &str_of(&d, "redirect_uri"), &state);
                         d.insert("oauth_state".into(), json!(state));
                         d.insert("authorize".into(), json!(url));
+                        // HomewrightHQ keeps the redirect for us if it arrives there
+                        let expected = host.request("oauth/expect", json!({ "state": state })).await.is_ok();
+                        d.insert("oauth_expected".into(), json!(expected));
                         Ok(auth_form(&url, json!({})).with_data(d))
                     }
                 }
@@ -225,7 +260,16 @@ impl Integration for MyUplink {
             ("auth", Some(v)) => {
                 let d = flow.data.clone();
                 let url = str_of(&d, "authorize");
-                let code = match api::parse_redirect(v["redirect_url"].as_str().unwrap_or(""), &str_of(&d, "oauth_state")) {
+                let pasted = v["redirect_url"].as_str().unwrap_or("").trim();
+                let state = str_of(&d, "oauth_state");
+                let code = if !pasted.is_empty() {
+                    api::parse_redirect(pasted, &state)
+                } else if d.get("oauth_expected").and_then(Value::as_bool).unwrap_or(false) {
+                    received_code(host, &state).await
+                } else {
+                    Err("missing_code")
+                };
+                let code = match code {
                     Ok(c) => c,
                     Err(e) => return Ok(auth_form(&url, json!({ "base": e })).with_data(d)),
                 };
